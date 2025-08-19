@@ -17,8 +17,581 @@
   </head>
   <body class="bg-gray-100">
     <div id="root"></div>
+
     <script type="text/babel">
-      // [Full Optishine CRM React app code here]
+      const { useEffect, useMemo, useState } = React;
+
+      // -------------------------------------------------
+      // Optishine CRM — single-file React app
+      // -------------------------------------------------
+      const STORAGE_KEY = "optishineCRM.customers.v1";
+      const EXPORT_FILENAME_PREFIX = "optishine_export";
+      const COMPANY_NAME = "Optishine";
+
+      // Utils
+      const uid = () => Math.random().toString(36).slice(2) + Date.now().toString(36);
+      const today = () => new Date().toISOString().slice(0, 10);
+      const classNames = (...xs) => xs.filter(Boolean).join(" ");
+      const save = (data) => localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+      const load = () => {
+        try {
+          const raw = localStorage.getItem(STORAGE_KEY);
+          if(!raw) return [];
+          const parsed = JSON.parse(raw);
+          return Array.isArray(parsed) ? parsed : [];
+        } catch { return []; }
+      };
+      const download = (filename, content, type="application/json") => {
+        const blob = new Blob([content], { type });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url; a.download = filename; a.click();
+        URL.revokeObjectURL(url);
+      };
+
+      // Contact helpers
+      const sanitizeForTel = (phone="") => phone.replace(/[^+\\d]/g, "");
+      const sanitizeForWA  = (phone="") => phone.replace(/\\D/g, "");
+      const emailHref = (to, subject, body) => {
+        const addr = String(to||"").trim();
+        const s = encodeURIComponent(subject||"");
+        const b = encodeURIComponent(body||"");
+        return \`mailto:\${addr}?subject=\${s}&body=\${b}\`;
+      };
+      const smsHref = (phone, body) => {
+        const p = sanitizeForTel(phone);
+        const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent);
+        const sep = isIOS ? "&" : "?";
+        const b = body ? \`\${sep}body=\${encodeURIComponent(body)}\` : "";
+        return \`sms:\${p}\${b}\`;
+      };
+      const waHref = (phone, text) => {
+        const p = sanitizeForWA(phone);
+        const t = text ? \`?text=\${encodeURIComponent(text)}\` : "";
+        return \`https://wa.me/\${p}\${t}\`;
+      };
+      const defaultEmailSubject = (c) => \`Quick follow-up from \${COMPANY_NAME}\`;
+      const defaultEmailBody = (c) => {
+        const lines = [
+          \`Hi \${c.name || "there"},\`,
+          "",
+          \`It was great connecting! Following up from \${COMPANY_NAME}.\`,
+          "",
+          \`Notes: \${c.notes || "(add notes here)"}\`,
+          "",
+          "Best,",
+          COMPANY_NAME
+        ];
+        return lines.join("\\n");
+      };
+      const defaultSMSText = (c) => \`Hi \${c.name||""}, this is \${COMPANY_NAME}. Following up on our conversation.\`;
+
+      const Tag = ({children}) => <span className="inline-flex items-center rounded-full bg-gray-100 px-2 py-0.5 text-xs text-gray-700 mr-1">{children}</span>;
+
+      const Header = ({count}) => (
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-end sm:justify-between">
+          <div>
+            <h1 className="text-2xl font-semibold tracking-tight">{COMPANY_NAME} CRM</h1>
+            <p className="text-sm text-gray-500">Store contacts locally • Free • No sign-up • {count} total</p>
+          </div>
+          <span className="text-xs text-gray-400">v1 (Local-Only)</span>
+        </div>
+      );
+
+      const Toolbar = ({ onAdd, onImportCSV, onExportJSON, onExportCSV, query, setQuery, sortBy, setSortBy, selectionCount, onBulkDelete, onBulkStatus }) => (
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between mt-4">
+          <div className="flex gap-2 w-full sm:w-auto">
+            <input
+              value={query}
+              onChange={(e)=>setQuery(e.target.value)}
+              placeholder="Search name, company, email, tag..."
+              className="w-full sm:w-80 rounded-xl border px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+            />
+            <select
+              className="rounded-xl border px-3 py-2 text-sm bg-white"
+              value={sortBy}
+              onChange={(e)=>setSortBy(e.target.value)}
+            >
+              <option value="updatedDesc">Sort: Updated (newest)</option>
+              <option value="createdDesc">Sort: Created (newest)</option>
+              <option value="nameAsc">Sort: Name (A→Z)</option>
+              <option value="followUpAsc">Sort: Next Follow-up</option>
+              <option value="statusAsc">Sort: Status</option>
+            </select>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {selectionCount>0 && (
+              <div className="flex items-center gap-2 mr-2">
+                <span className="text-sm text-gray-600">Selected: {selectionCount}</span>
+                <button className="rounded-xl bg-red-50 text-red-700 border border-red-200 px-3 py-2 text-sm hover:bg-red-100" onClick={onBulkDelete}>Delete</button>
+                <select className="rounded-xl border px-3 py-2 text-sm" onChange={(e)=> onBulkStatus(e.target.value)} defaultValue="">
+                  <option value="" disabled>Set status…</option>
+                  <option>Lead</option>
+                  <option>Prospect</option>
+                  <option>Active</option>
+                  <option>Churned</option>
+                </select>
+              </div>
+            )}
+            <button className="rounded-xl bg-indigo-600 text-white px-3 py-2 text-sm hover:bg-indigo-700" onClick={onAdd}>Add customer</button>
+            <button className="rounded-xl border px-3 py-2 text-sm hover:bg-gray-50" onClick={onImportCSV}>Import CSV</button>
+            <button className="rounded-xl border px-3 py-2 text-sm hover:bg-gray-50" onClick={onExportCSV}>Export CSV</button>
+            <button className="rounded-xl border px-3 py-2 text-sm hover:bg-gray-50" onClick={onExportJSON}>Export JSON</button>
+          </div>
+        </div>
+      );
+
+      const EmptyState = () => (
+        <div className="border rounded-2xl p-6 text-center text-gray-600 bg-white">
+          <p className="mb-2">No customers yet.</p>
+          <p className="text-sm">Click <b>Add customer</b> to create your first record, or <b>Import CSV</b>.</p>
+        </div>
+      );
+
+      const ContactButtons = ({ c }) => {
+        const subject = defaultEmailSubject(c);
+        const body = defaultEmailBody(c);
+        const sms = defaultSMSText(c);
+        return (
+          <div className="flex flex-wrap gap-1 justify-end">
+            {c.email && (
+              <a className="rounded-lg border px-2 py-1 text-xs hover:bg-gray-50" href={emailHref(c.email, subject, body)} title="Email">Email</a>
+            )}
+            {c.phone && (
+              <a className="rounded-lg border px-2 py-1 text-xs hover:bg-gray-50" href={`tel:${sanitizeForTel(c.phone)}`} title="Call">Call</a>
+            )}
+            {c.phone && (
+              <a className="rounded-lg border px-2 py-1 text-xs hover:bg-gray-50" href={smsHref(c.phone, sms)} title="SMS">SMS</a>
+            )}
+            {c.phone && (
+              <a className="rounded-lg border px-2 py-1 text-xs hover:bg-gray-50" href={waHref(c.phone, sms)} target="_blank" rel="noreferrer" title="WhatsApp">WhatsApp</a>
+            )}
+          </div>
+        );
+      };
+
+      const CustomerRow = ({ c, selected, toggleSelect, onEdit, onDelete }) => {
+        const overdue = c.nextFollowUp && c.nextFollowUp < today();
+        return (
+          <tr className="border-b last:border-b-0 hover:bg-gray-50">
+            <td className="p-3 align-top"><input type="checkbox" checked={selected} onChange={()=>toggleSelect(c.id)} /></td>
+            <td className="p-3 align-top">
+              <div className="font-medium">{c.name}</div>
+              <div className="text-xs text-gray-500">{c.company || "—"}</div>
+            </td>
+            <td className="p-3 align-top">
+              <div className="text-sm">{c.email ? (<a className="text-indigo-600 hover:underline" href={emailHref(c.email, defaultEmailSubject(c), defaultEmailBody(c))}>{c.email}</a>) : "—"}</div>
+              <div className="text-sm">{c.phone ? (<a className="text-indigo-600 hover:underline" href={`tel:${sanitizeForTel(c.phone)}`}>{c.phone}</a>) : "—"}</div>
+            </td>
+            <td className="p-3 align-top">
+              <div className={[
+                "inline-flex items-center rounded-full px-2 py-0.5 text-xs",
+                c.status === "Active" ? "bg-green-100 text-green-700" :
+                c.status === "Lead" ? "bg-blue-100 text-blue-700" :
+                c.status === "Prospect" ? "bg-purple-100 text-purple-700" :
+                c.status === "Churned" ? "bg-red-100 text-red-700" : "bg-gray-100 text-gray-700"
+              ].join(" ")}>{c.status || "—"}</div>
+            </td>
+            <td className="p-3 align-top">
+              {c.nextFollowUp ? (
+                <span className={["text-sm", overdue ? "text-red-600 font-medium" : "text-gray-700"].join(" ")}>{c.nextFollowUp}</span>
+              ) : "—"}
+            </td>
+            <td className="p-3 align-top">
+              <div className="max-w-xs truncate text-sm" title={c.notes || ""}>{c.notes || "—"}</div>
+              <div className="mt-1">{(c.tags||[]).slice(0,3).map((t,i)=>(<Tag key={i}>{t}</Tag>))}{(c.tags||[]).length>3 && <span className="text-xs text-gray-500">+{(c.tags||[]).length-3}</span>}</div>
+            </td>
+            <td className="p-3 align-top text-right">
+              <div className="flex items-center gap-2 justify-end">
+                <button className="rounded-lg border px-2 py-1 text-xs hover:bg-gray-50" onClick={()=>onEdit(c)}>Edit</button>
+                <button className="rounded-lg border px-2 py-1 text-xs hover:bg-red-50 border-red-200 text-red-700" onClick={()=>onDelete(c.id)}>Delete</button>
+                <ContactButtons c={c} />
+              </div>
+            </td>
+          </tr>
+        );
+      };
+
+      const CustomerCards = ({ items, selectedIds, toggleSelect, onEdit, onDelete }) => (
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+          {items.map(c=>{
+            const overdue = c.nextFollowUp && c.nextFollowUp < today();
+            return (
+              <div key={c.id} className="rounded-2xl border p-4 bg-white">
+                <div className="flex items-start justify-between">
+                  <div>
+                    <div className="font-medium text-base">{c.name}</div>
+                    <div className="text-xs text-gray-500">{c.company || "—"}</div>
+                  </div>
+                  <input type="checkbox" checked={selectedIds.has(c.id)} onChange={()=>toggleSelect(c.id)} />
+                </div>
+                <div className="mt-2 text-sm"><span className="text-gray-500">Email:</span> {c.email ? (<a className="text-indigo-600 hover:underline" href={emailHref(c.email, defaultEmailSubject(c), defaultEmailBody(c))}>{c.email}</a>) : "—"}</div>
+                <div className="text-sm"><span className="text-gray-500">Phone:</span> {c.phone ? (<a className="text-indigo-600 hover:underline" href={`tel:${sanitizeForTel(c.phone)}`}>{c.phone}</a>) : "—"}</div>
+                <div className="mt-2"><span className="text-gray-500 text-sm">Status:</span> <span className={[
+                  "ml-2 inline-flex items-center rounded-full px-2 py-0.5 text-xs",
+                  c.status === "Active" ? "bg-green-100 text-green-700" :
+                  c.status === "Lead" ? "bg-blue-100 text-blue-700" :
+                  c.status === "Prospect" ? "bg-purple-100 text-purple-700" :
+                  c.status === "Churned" ? "bg-red-100 text-red-700" : "bg-gray-100 text-gray-700"
+                ].join(" ")}>{c.status || "—"}</span></div>
+                <div className="mt-1 text-sm"><span className="text-gray-500">Next Follow-up:</span> <span className={[
+                  "", c.nextFollowUp && c.nextFollowUp < today() ? "text-red-600 font-medium" : "text-gray-700"
+                ].join(" ")}>{c.nextFollowUp || "—"}</span></div>
+                <div className="mt-2 text-sm"><span className="text-gray-500">Tags:</span> {(c.tags||[]).length? c.tags.map((t,i)=>(<Tag key={i}>{t}</Tag>)) : " —"}</div>
+                <div className="mt-2 text-sm line-clamp-3" title={c.notes || ""}><span className="text-gray-500">Notes:</span> {c.notes || "—"}</div>
+                <div className="mt-3 flex gap-2 justify-end">
+                  <button className="rounded-lg border px-2 py-1 text-xs hover:bg-gray-50" onClick={()=>onEdit(c)}>Edit</button>
+                  <button className="rounded-lg border px-2 py-1 text-xs hover:bg-red-50 border-red-200 text-red-700" onClick={()=>onDelete(c.id)}>Delete</button>
+                  <ContactButtons c={c} />
+                </div>
+              </div>
+            )
+          })}
+        </div>
+      );
+
+      const CustomerForm = ({ initial, onSubmit, onCancel }) => {
+        const [name, setName] = useState(initial?.name || "");
+        const [email, setEmail] = useState(initial?.email || "");
+        const [phone, setPhone] = useState(initial?.phone || "");
+        const [company, setCompany] = useState(initial?.company || COMPANY_NAME);
+        const [status, setStatus] = useState(initial?.status || "Lead");
+        const [nextFollowUp, setNextFollowUp] = useState(initial?.nextFollowUp || "");
+        const [tags, setTags] = useState((initial?.tags || []).join(", "));
+        const [notes, setNotes] = useState(initial?.notes || "");
+
+        const submit = (e) => {
+          e.preventDefault();
+          if(!name.trim()){ alert("Name is required"); return; }
+          const payload = {
+            ...(initial || {}),
+            name: name.trim(),
+            email: email.trim() || undefined,
+            phone: phone.trim() || undefined,
+            company: company.trim() || undefined,
+            status,
+            nextFollowUp: nextFollowUp || undefined,
+            tags: tags.split(",").map(t=>t.trim()).filter(Boolean),
+            notes: notes.trim() || undefined,
+          };
+          onSubmit(payload);
+        };
+
+        return (
+          <form onSubmit={submit} className="space-y-3">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div>
+                <label className="block text-xs text-gray-600 mb-1">Name *</label>
+                <input className="w-full rounded-xl border px-3 py-2 text-sm" value={name} onChange={e=>setName(e.target.value)} required />
+              </div>
+              <div>
+                <label className="block text-xs text-gray-600 mb-1">Company</label>
+                <input className="w-full rounded-xl border px-3 py-2 text-sm" value={company} onChange={e=>setCompany(e.target.value)} />
+              </div>
+              <div>
+                <label className="block text-xs text-gray-600 mb-1">Email</label>
+                <input type="email" className="w-full rounded-xl border px-3 py-2 text-sm" value={email} onChange={e=>setEmail(e.target.value)} />
+              </div>
+              <div>
+                <label className="block text-xs text-gray-600 mb-1">Phone</label>
+                <input className="w-full rounded-xl border px-3 py-2 text-sm" value={phone} onChange={e=>setPhone(e.target.value)} placeholder="+1 555 123 4567" />
+              </div>
+              <div>
+                <label className="block text-xs text-gray-600 mb-1">Status</label>
+                <select className="w-full rounded-xl border px-3 py-2 text-sm bg-white" value={status} onChange={e=>setStatus(e.target.value)}>
+                  <option>Lead</option>
+                  <option>Prospect</option>
+                  <option>Active</option>
+                  <option>Churned</option>
+                </select>
+              </div>
+              <div>
+                <label className="block text-xs text-gray-600 mb-1">Next follow-up</label>
+                <input type="date" className="w-full rounded-xl border px-3 py-2 text-sm" value={nextFollowUp || ""} onChange={e=>setNextFollowUp(e.target.value)} />
+              </div>
+              <div className="sm:col-span-2">
+                <label className="block text-xs text-gray-600 mb-1">Tags (comma separated)</label>
+                <input className="w-full rounded-xl border px-3 py-2 text-sm" value={tags} onChange={e=>setTags(e.target.value)} placeholder="vip, warm, referral" />
+              </div>
+              <div className="sm:col-span-2">
+                <label className="block text-xs text-gray-600 mb-1">Notes</label>
+                <textarea className="w-full rounded-xl border px-3 py-2 text-sm min-h-[80px]" value={notes} onChange={e=>setNotes(e.target.value)} placeholder="Context, last interaction, next steps..." />
+              </div>
+            </div>
+            <div className="flex items-center justify-end gap-2 pt-2">
+              <button type="button" className="rounded-xl border px-3 py-2 text-sm hover:bg-gray-50" onClick={onCancel}>Cancel</button>
+              <button type="submit" className="rounded-xl bg-indigo-600 text-white px-3 py-2 text-sm hover:bg-indigo-700">Save</button>
+            </div>
+          </form>
+        );
+      };
+
+      const App = () => {
+        const [items, setItems] = useState(load());
+        const [query, setQuery] = useState("");
+        const [sortBy, setSortBy] = useState("updatedDesc");
+        const [showForm, setShowForm] = useState(false);
+        const [editing, setEditing] = useState(undefined);
+        const [selectedIds, setSelectedIds] = useState(new Set());
+
+        useEffect(()=>{ save(items); }, [items]);
+
+        const filtered = useMemo(()=>{
+          const q = query.trim().toLowerCase();
+          let res = items.filter(c=>{
+            if(!q) return true;
+            const hay = [c.name, c.company, c.email, c.phone, c.notes, ...(c.tags||[])].join(" ").toLowerCase();
+            return hay.includes(q);
+          });
+          res.sort((a,b)=>{
+            switch(sortBy){
+              case "nameAsc": return a.name.localeCompare(b.name);
+              case "createdDesc": return (b.createdAt||"").localeCompare(a.createdAt||"");
+              case "followUpAsc": return (a.nextFollowUp||"9999-99-99").localeCompare(b.nextFollowUp||"9999-99-99");
+              case "statusAsc": return (a.status||"").localeCompare(b.status||"");
+              default: return (b.updatedAt||"").localeCompare(a.updatedAt||"");
+            }
+          });
+          return res;
+        }, [items, query, sortBy]);
+
+        const allSelected = filtered.length>0 && filtered.every(c=>selectedIds.has(c.id));
+
+        const toggleSelect = (id) => {
+          setSelectedIds(prev=>{
+            const next = new Set(prev);
+            if(next.has(id)) next.delete(id); else next.add(id);
+            return next;
+          });
+        };
+        const toggleSelectAll = () => {
+          setSelectedIds(prev=>{
+            const next = new Set(prev);
+            if(allSelected){ filtered.forEach(c=> next.delete(c.id)); }
+            else { filtered.forEach(c=> next.add(c.id)); }
+            return next;
+          });
+        };
+
+        const handleAdd = () => { setEditing(undefined); setShowForm(true); };
+        const handleEdit = (c) => { setEditing(c); setShowForm(true); };
+        const handleDelete = (id) => {
+          if(confirm("Delete this customer?")){
+            setItems(prev=> prev.filter(x=>x.id!==id));
+            setSelectedIds(prev=>{ const s=new Set(prev); s.delete(id); return s; });
+          }
+        };
+        const handleSubmit = (partial) => {
+          if(editing){
+            setItems(prev=> prev.map(x=> x.id===editing.id ? { ...editing, ...partial, updatedAt: new Date().toISOString() } : x));
+          } else {
+            const now = new Date().toISOString();
+            const newItem = { id: uid(), createdAt: now, updatedAt: now, status: "Lead", ...partial };
+            setItems(prev=> [newItem, ...prev]);
+          }
+          setShowForm(false);
+          setEditing(undefined);
+        };
+
+        const bulkDelete = () => {
+          if(selectedIds.size===0) return;
+          if(confirm(\`Delete \${selectedIds.size} selected?\`)){
+            setItems(prev=> prev.filter(x=> !selectedIds.has(x.id)));
+            setSelectedIds(new Set());
+          }
+        };
+        const bulkStatus = (nextStatus) => {
+          if(!nextStatus) return;
+          setItems(prev=> prev.map(x=> selectedIds.has(x.id) ? { ...x, status: nextStatus, updatedAt: new Date().toISOString() } : x));
+        };
+
+        const exportJSON = () => {
+          const payload = JSON.stringify(items, null, 2);
+          download(\`\${EXPORT_FILENAME_PREFIX}_\${new Date().toISOString().slice(0,10)}.json\`, payload);
+        };
+        const toCSV = () => {
+          const headers = ["id","name","email","phone","company","status","nextFollowUp","tags","notes","createdAt","updatedAt"];
+          const rows = items.map(c=>[
+            c.id,
+            quote(c.name),
+            quote(c.email||""),
+            quote(c.phone||""),
+            quote(c.company||""),
+            c.status||"",
+            c.nextFollowUp||"",
+            quote((c.tags||[]).join(";")),
+            quote((c.notes||"").replace(/\\n/g, " ")), 
+            c.createdAt||"",
+            c.updatedAt||"",
+          ].join(","));
+          function quote(v){
+            const s = String(v??"");
+            if(/[",\\n]/.test(s)) return '"'+s.replace(/"/g,'""')+'"';
+            return s;
+          }
+          return [headers.join(","), ...rows].join("\\n");
+        };
+        const exportCSV = () => {
+          download(\`\${EXPORT_FILENAME_PREFIX}_\${new Date().toISOString().slice(0,10)}.csv\`, toCSV(), "text/csv");
+        };
+
+        const importCSV = () => {
+          const input = document.createElement("input");
+          input.type = "file"; input.accept = ".csv";
+          input.onchange = () => {
+            const file = input.files?.[0];
+            if(!file) return;
+            const reader = new FileReader();
+            reader.onload = () => {
+              try{
+                const text = String(reader.result||"");
+                const parsed = parseCSV(text);
+                const now = new Date().toISOString();
+                const imported = parsed.map((r)=>({
+                  id: r.id || uid(),
+                  name: r.name || r.Name || r.full_name || r.FullName || "Unnamed",
+                  email: r.email || r.Email || undefined,
+                  phone: r.phone || r.Phone || undefined,
+                  company: r.company || r.Company || undefined,
+                  status: r.status || r.Status || "Lead",
+                  nextFollowUp: r.nextFollowUp || r.NextFollowUp || r.next_follow_up || r.follow_up || undefined,
+                  tags: (r.tags || r.Tags || "").toString().split(/[,;]/).map(s=>s.trim()).filter(Boolean),
+                  notes: r.notes || r.Notes || undefined,
+                  createdAt: r.createdAt || r.CreatedAt || now,
+                  updatedAt: r.updatedAt || r.UpdatedAt || now,
+                }));
+                setItems(prev=>{
+                  const byId = new Map(prev.map(x=>[x.id,x]));
+                  imported.forEach(x=> byId.set(x.id, x));
+                  return Array.from(byId.values());
+                });
+                alert(\`Imported \${imported.length} records.\`);
+              } catch(err){
+                console.error(err);
+                alert("Failed to import CSV. Check formatting.");
+              }
+            };
+            reader.readAsText(file);
+          };
+          input.click();
+        };
+
+        function parseCSV(text){
+          const rows = [];
+          let i=0, field="", row=[], inQuotes=false;
+          const pushField = ()=>{ row.push(field); field=""; };
+          const pushRow = ()=>{ rows.push(row); row=[]; };
+          while(i<text.length){
+            const ch = text[i++];
+            if(inQuotes){
+              if(ch === '"'){
+                if(text[i] === '"'){ field+='"'; i++; } else { inQuotes = false; }
+              } else { field += ch; }
+            } else {
+              if(ch === '"') inQuotes = true;
+              else if(ch === ',') pushField();
+              else if(ch === '\\n'){ pushField(); pushRow(); }
+              else if(ch === '\\r'){ /* ignore */ }
+              else field += ch;
+            }
+          }
+          pushField(); if(row.length) pushRow();
+          if(!rows.length) return [];
+          const headers = rows.shift().map(h=>h.trim());
+          return rows.filter(r=>r.some(Boolean)).map(r=>{
+            const obj = {}; headers.forEach((h,idx)=> obj[h]=r[idx]); return obj;
+          });
+        }
+
+        return (
+          <div className="min-h-screen bg-gray-100 text-gray-900">
+            <div className="max-w-6xl mx-auto p-4 sm:p-6">
+              <Header count={items.length} />
+              <Toolbar
+                onAdd={()=>setShowForm(true)}
+                onImportCSV={importCSV}
+                onExportJSON={exportJSON}
+                onExportCSV={exportCSV}
+                query={query}
+                setQuery={setQuery}
+                sortBy={sortBy}
+                setSortBy={setSortBy}
+                selectionCount={selectedIds.size}
+                onBulkDelete={bulkDelete}
+                onBulkStatus={bulkStatus}
+              />
+
+              <div className="mt-4 bg-white border rounded-2xl overflow-hidden">
+                {filtered.length===0 ? (
+                  <EmptyState />
+                ) : (
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-sm">
+                      <thead className="bg-gray-50 text-left text-gray-600">
+                        <tr>
+                          <th className="p-3 w-10"><input type="checkbox" checked={allSelected} onChange={toggleSelectAll} /></th>
+                          <th className="p-3">Customer</th>
+                          <th className="p-3">Contact</th>
+                          <th className="p-3">Status</th>
+                          <th className="p-3">Next Follow-up</th>
+                          <th className="p-3">Notes & Tags</th>
+                          <th className="p-3 text-right">Actions</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {filtered.map(c => (
+                          <CustomerRow
+                            key={c.id}
+                            c={c}
+                            selected={selectedIds.has(c.id)}
+                            toggleSelect={toggleSelect}
+                            onEdit={(c)=>{ setEditing(c); setShowForm(true); }}
+                            onDelete={handleDelete}
+                          />
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+
+              {/* Mobile cards */}
+              <div className="mt-4 sm:hidden">
+                <CustomerCards
+                  items={filtered}
+                  selectedIds={selectedIds}
+                  toggleSelect={toggleSelect}
+                  onEdit={(c)=>{ setEditing(c); setShowForm(true); }}
+                  onDelete={handleDelete}
+                />
+              </div>
+
+              {showForm && (
+                <div className="fixed inset-0 bg-black/40 flex items-center justify-center p-4 z-50">
+                  <div className="bg-white rounded-2xl w-full max-w-2xl p-4 sm:p-6 shadow-xl">
+                    <div className="flex items-center justify-between mb-4">
+                      <h2 className="text-lg font-semibold">{editing? "Edit" : "Add"} customer</h2>
+                      <button className="text-gray-500 hover:text-gray-700" onClick={()=>{setShowForm(false); setEditing(undefined);}}>✕</button>
+                    </div>
+                    <CustomerForm
+                      initial={editing}
+                      onSubmit={(payload)=>{ handleSubmit(payload); }}
+                      onCancel={()=>{setShowForm(false); setEditing(undefined);}}
+                    />
+                  </div>
+                </div>
+              )}
+
+              <div className="mt-6 text-xs text-gray-500 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+                <div>Data is stored only in your browser via <code>localStorage</code>. Clear it from Settings → Site data to reset.</div>
+                <div>Tip: Use <b>Export JSON</b> regularly for backups; you can re-import using CSV/JSON.</div>
+              </div>
+            </div>
+          </div>
+        );
+      };
+
+      ReactDOM.createRoot(document.getElementById("root")).render(<App />);
     </script>
   </body>
 </html>
